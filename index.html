@@ -56,9 +56,10 @@
 
     <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
 
-    <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-database-compat.js"></script>
 
     <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 
@@ -1188,9 +1189,9 @@
 
         firebase.initializeApp(firebaseConfig);
 
-        const database = firebase.database();
-
         const auth = firebase.auth();
+
+        const supabaseClient = supabase.createClient('https://xqhzbfdfjvcsbplrcjgs.supabase.co', 'sb_publishable_r22J9ubJVWBFLqssTs7TYw_kcUWWOdW');
 
 
 
@@ -1416,7 +1417,7 @@
 
                 await cred.user.updateProfile({ displayName: name });
 
-                await database.ref('users/'+cred.user.uid).set({ name, email, password });
+                await supabaseClient.from('users').upsert({ uid: cred.user.uid, name, email, password });
 
                 closeAuthModal(); showProfilePage();
 
@@ -1458,7 +1459,7 @@
 
             let userData = {};
 
-            try { const snap=await database.ref('users/'+currentUser.uid).once('value'); userData=snap.val()||{}; } catch(e){}
+            try { const { data } = await supabaseClient.from('users').select('*').eq('uid', currentUser.uid).maybeSingle(); userData=data||{}; } catch(e){}
 
             const name = userData.name||currentUser.displayName||'ব্যবহারকারী';
 
@@ -1552,7 +1553,7 @@
 
         function detachCommentListener() {
 
-            if (currentCommentRef) { currentCommentRef.off('value'); currentCommentRef=null; }
+            if (currentCommentRef) { supabaseClient.removeChannel(currentCommentRef); currentCommentRef=null; }
 
         }
 
@@ -1646,19 +1647,17 @@
 
             detachCommentListener();
 
-            currentCommentRef = database.ref('comments/'+articleId).orderByChild('timestamp');
+            const fetchAndRender = async () => {
 
-            currentCommentRef.on('value', snapshot => {
+                const { data } = await supabaseClient.from('comments').select('*').eq('articleId', articleId).order('timestamp', { ascending: false });
+
+                const comments = data || [];
 
                 const listEl=document.getElementById('commentList');
 
                 const countEl=document.getElementById('commentCountBadge');
 
                 if (!listEl) return;
-
-                const raw=snapshot.val()||{};
-
-                const comments=Object.values(raw).sort((a,b)=>b.timestamp-a.timestamp);
 
                 if (countEl) countEl.textContent=comments.length;
 
@@ -1689,7 +1688,13 @@
 
                 </div>`).join('');
 
-            });
+            };
+
+            fetchAndRender();
+
+            currentCommentRef = supabaseClient.channel('comments-' + articleId)
+                .on('postgres_changes', { event: '*', schema: 'public', table: 'comments', filter: `articleId=eq.${articleId}` }, fetchAndRender)
+                .subscribe();
 
         }
 
@@ -1713,7 +1718,7 @@
 
             const userName=currentUser.displayName||currentUser.email.split('@')[0];
 
-            await database.ref('comments/'+articleId).push({ userId:currentUser.uid, userName, text, timestamp:Date.now() });
+            await supabaseClient.from('comments').insert({ articleId, userId:currentUser.uid, userName, text, timestamp:Date.now() });
 
             input.value='';
 
@@ -2011,17 +2016,27 @@
 
             try{const cached=localStorage.getItem('menus_cache');if(cached){allMenus=JSON.parse(cached);renderMenus();renderBreadcrumbBar();}}catch(e){}
 
-            database.ref('menus').on('value',(snapshot)=>{
+            supabaseClient.from('menus').select('*').then(({ data }) => {
 
-                const menus=snapshot.val()||{};
-
-                allMenus=Object.entries(menus).map(([key,value])=>({id:key,...value}));
+                allMenus = data || [];
 
                 try{localStorage.setItem('menus_cache',JSON.stringify(allMenus));}catch(e){}
 
                 renderMenus(); renderBreadcrumbBar(); renderCategoryNavSection();
 
             });
+
+            supabaseClient.channel('menus-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'menus' }, async () => {
+
+                const { data } = await supabaseClient.from('menus').select('*');
+
+                allMenus = data || [];
+
+                try{localStorage.setItem('menus_cache',JSON.stringify(allMenus));}catch(e){}
+
+                renderMenus(); renderBreadcrumbBar(); renderCategoryNavSection();
+
+            }).subscribe();
 
         }
 
@@ -2343,17 +2358,27 @@
 
             try{const cached=localStorage.getItem('articles_cache');if(cached){allArticles=JSON.parse(cached);renderHomePage();renderRecentSection();renderLatestCommentsSection();startSlider();}}catch(e){}
 
-            database.ref('articles').on('value',(snapshot)=>{
+            supabaseClient.from('articles').select('*').order('timestamp', { ascending: false }).then(({ data }) => {
 
-                const articles=snapshot.val()||{};
-
-                allArticles=Object.entries(articles).map(([key,value])=>({id:key,...value})).sort((a,b)=>b.timestamp-a.timestamp);
+                allArticles = data || [];
 
                 try{localStorage.setItem('articles_cache',JSON.stringify(allArticles));}catch(e){}
 
                 renderHomePage(); renderCategoryNavSection(); renderRecentSection(); renderLatestCommentsSection(); startSlider();
 
             });
+
+            supabaseClient.channel('articles-changes').on('postgres_changes', { event: '*', schema: 'public', table: 'articles' }, async () => {
+
+                const { data } = await supabaseClient.from('articles').select('*').order('timestamp', { ascending: false });
+
+                allArticles = data || [];
+
+                try{localStorage.setItem('articles_cache',JSON.stringify(allArticles));}catch(e){}
+
+                renderHomePage(); renderCategoryNavSection(); renderRecentSection(); renderLatestCommentsSection(); startSlider();
+
+            }).subscribe();
 
         }
 
@@ -2533,25 +2558,9 @@
 
             try {
 
-                const snap=await database.ref('comments').once('value');
+                const { data: allComments } = await supabaseClient.from('comments').select('*').order('timestamp', { ascending: false }).limit(6);
 
-                const allCommentsRaw=snap.val()||{};
-
-                let allComments=[];
-
-                Object.entries(allCommentsRaw).forEach(([articleId,commentsObj])=>{
-
-                    Object.values(commentsObj).forEach(c=>{
-
-                        allComments.push({...c, articleId});
-
-                    });
-
-                });
-
-                allComments.sort((a,b)=>b.timestamp-a.timestamp);
-
-                const latest6=allComments.slice(0,6);
+                const latest6 = allComments || [];
 
                 if(latest6.length===0){container.innerHTML='';return;}
 
@@ -2679,11 +2688,9 @@
 
                 const articleId=el.id.replace('cmtcount-','');
 
-                database.ref('comments/'+articleId).once('value').then(snap=>{
+                supabaseClient.from('comments').select('*', { count: 'exact', head: true }).eq('articleId', articleId).then(({ count }) => {
 
-                    const count=snap.exists()?Object.keys(snap.val()).length:0;
-
-                    el.innerHTML=`<i class="far fa-comment"></i>&nbsp;${count}`;
+                    el.innerHTML=`<i class="far fa-comment"></i>&nbsp;${count||0}`;
 
                 }).catch(()=>{});
 
@@ -2915,13 +2922,11 @@
 
             filteredArticles.forEach(a=>{
 
-                database.ref('comments/'+a.id).once('value').then(snap=>{
-
-                    const count=snap.exists()?Object.keys(snap.val()).length:0;
+                supabaseClient.from('comments').select('*', { count: 'exact', head: true }).eq('articleId', a.id).then(({ count }) => {
 
                     const el=document.getElementById('flt-cmt-'+a.id);
 
-                    if(el) el.innerHTML=`<i class="far fa-comment"></i> ${count}`;
+                    if(el) el.innerHTML=`<i class="far fa-comment"></i> ${count||0}`;
 
                 }).catch(()=>{});
 
@@ -2961,11 +2966,17 @@
 
             if(!skipViewCount&&currentArticleId!==articleId){
 
-                const vRef=database.ref(`articleViews/${articleId}/${visitorIP.replace(/\./g,'_')}`);
+                const { data: existView } = await supabaseClient.from('article_views').select('id').eq('articleId', articleId).eq('visitorIp', visitorIP).maybeSingle();
 
-                const snap=await vRef.once('value');
+                if(!existView){
 
-                if(!snap.exists()){vRef.set(true);database.ref(`articles/${articleId}/views`).transaction(c=>(c||0)+1);}
+                    await supabaseClient.from('article_views').insert({ articleId, visitorIp: visitorIP });
+
+                    const { data: artData } = await supabaseClient.from('articles').select('views').eq('id', articleId).maybeSingle();
+
+                    await supabaseClient.from('articles').update({ views: (artData?.views||0)+1 }).eq('id', articleId);
+
+                }
 
             }
 
